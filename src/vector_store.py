@@ -1,41 +1,45 @@
+import uuid
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
 class VideoDatabase:
-    def __init__(self, vector_size: int = 512): # X-CLIP outputs 512-dimensional vectors!
-        # We use ":memory:" to run it locally without a heavy server setup
-        self.client = QdrantClient(":memory:")
-        self.collection_name = "video_library"
+    def __init__(self, collection_name: str = "video_chunks", vector_size: int = 512):
+        self.collection_name = collection_name
+        self.client = QdrantClient(":memory:")  # Using local memory for the prototype
         
-        # Initialize the database schema
-        self.client.create_collection(
+        # Recreate the collection to ensure a clean slate
+        self.client.recreate_collection(
             collection_name=self.collection_name,
             vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
         )
-        self.next_id = 0
 
-    def index_video(self, video_path: str, embedding: list):
-        """Saves the video embedding and its file path (metadata) to the database."""
+    def index_video_chunk(self, video_path: str, embedding: list[float], start_sec: float, end_sec: float, camera_id: str):
+        """Saves a 5-second video vector into the database with its temporal metadata."""
+        point_id = str(uuid.uuid4()) # Generate a unique ID for this specific chunk
+        
         self.client.upsert(
             collection_name=self.collection_name,
             points=[
                 PointStruct(
-                    id=self.next_id,
+                    id=point_id,
                     vector=embedding,
-                    payload={"file_path": video_path} # Metadata so we know which video matched
+                    payload={
+                        "file_path": video_path,
+                        "camera_id": camera_id,
+                        "start_time": start_sec,
+                        "end_time": end_sec
+                    }
                 )
             ]
         )
-        print(f"Indexed {video_path} into database with ID {self.next_id}")
-        self.next_id += 1
 
-    def search_videos(self, text_embedding: list, top_results: int = 1):
-        """Searches the database for the closest video match."""
-        # We now use query_points() instead of search()
-        search_result = self.client.query_points(
+    def search_videos(self, query_vector: list[float], top_results: int = 5) -> list:
+        """Searches the database and returns multiple matches to build a timeline."""
+        # Updated for Qdrant v1.10+ using query_points instead of search
+        results = self.client.query_points(
             collection_name=self.collection_name,
-            query=text_embedding, # This parameter changed from 'query_vector' to 'query'
+            query=query_vector,
             limit=top_results
-        ).points # We append .points to directly grab the list of matched videos
-        
-        return search_result
+        )
+        # We append .points to return the raw list of matches just like the old API did
+        return results.points
