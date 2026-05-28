@@ -24,7 +24,6 @@ def run_search_engine():
             if filename.lower().endswith(".mp4"): 
                 filepath = os.path.join(data_folder, filename)
                 
-                # CHANGED: X-CLIP requires exactly 8 frames for this checkpoint
                 frames = load_video_frames(filepath, num_frames=32)
                 video_vector = embedder.get_video_feature_vector(frames)
                 
