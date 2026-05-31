@@ -1,62 +1,65 @@
-# Zero-Shot Multimodal Video Retrieval Engine
+# 🎯 Multi-Target Multi-Camera (MTMC) Tracker
 
+A Zero-Shot Semantic Search Engine for tracking targets across multi-camera video networks. This pipeline utilizes Microsoft's XCLIP AI model and a Qdrant vector database to allow users to locate specific subjects (e.g., "a person wearing a red shirt") across hours of unannotated spatial video feeds.
 
+## ✨ Key Features
 
-A spatio-temporal AI search engine that retrieves video files based on natural language queries without relying on frame-by-frame 2D classification. This project leverages zero-shot cross-modal alignment to map raw video streams and text inputs into a shared 512-dimensional vector space for high-speed semantic retrieval.
+* **Zero-Shot Semantic Tracking:** Search for visual targets using natural language without needing pre-labeled bounding boxes or specific training data.
+* **Deep Recursive Ingestion:** Intelligently scans complex, nested directory structures (e.g., `Warehouse_XXX/videos/`) to automatically locate and process unindexed `.mp4` feeds.
+* **Anti-Lock Database Architecture:** Utilizes a decoupled Qdrant local storage engine (`local_vector_db`) to completely bypass Windows OS permission blocks, Antivirus scanning locks, and IDE read-locks.
+* **Automated Factory Resets:** Includes a `--reindex` CLI flag that safely wipes broken/old database structures and rebuilds the collection architecture from scratch.
+* **Memory-Safe Processing:** Processes video streams in memory-managed 5-second temporal chunks, utilizing garbage collection and batched GPU tensor processing to prevent RAM exhaustion.
+* **Interactive UI:** A Streamlit dashboard featuring an Altair-powered Spatio-Temporal Gantt chart to visualize re-identification timelines.
 
+---
 
+## 🛠️ Installation & Setup
 
-### System Architecture
+**1. Clone the Repository**
+git clone https://github.com/<YOUR_USERNAME>/video_search_engine.git
+cd video_search_engine
 
+**2. Create the Virtual Environment**
+python -m venv venv
+venv\Scripts\activate  # On Mac/Linux use: source venv/bin/activate
 
+**3. Install Dependencies**
+pip install -r requirements.txt
 
-Instead of traditional, computationally heavy object detection loops, this pipeline decouples frame decoding from embedding generation.
+**4. Download the Sample Dataset**
+*Downloads the NVIDIA PhysicalAI SmartSpaces validation videos.*
+python download_nvidia_data.py
 
+---
 
+## 🚀 Usage Guide
 
-Data Ingestion: Uniform temporal subsampling extracts exactly 32 frames per video, ensuring temporal consistency regardless of the original video's length or framerate.
+### Phase 1: Video Ingestion & Indexing
+Before you can search, the AI needs to process the camera feeds, generate 512-dimensional feature vectors, and store them in the Qdrant database.
 
+Run the ingestion script:
+python main.py --data "data/MTMC_Tracking_2026/val"
 
+**Need to start over?** If you want to clear the database and force a fresh ingestion, use the reindex flag:
+python main.py --data "data/MTMC_Tracking_2026/val" --reindex
 
-Feature Extraction (The Backbone): Utilizes a pre-trained X-CLIP Vision Transformer (microsoft/xclip-base-patch16-zero-shot) to capture deep spatio-temporal dependencies.
+### Phase 2: Semantic Search Dashboard
+Once the indexing is complete, launch the Streamlit frontend to start tracking targets.
 
+streamlit run app.py
 
+1. Open the local web address provided in your terminal.
+2. Type a natural language query into the search bar.
+3. Adjust the **Confidence Filter Threshold** to refine your matches.
+4. View the generated spatio-temporal timeline and the verified source footage!
 
-Vector Database: High-dimensional embeddings are indexed using Qdrant (Cosine Similarity) for instantaneous semantic search, bypassing linear scan bottlenecks.
+---
 
+## 🗂️ Project Structure
 
-
-### Engineering Challenges \& Optimizations
-
-
-
-Overcoming Memory Bottlenecks: Raw video tensors (\[Batch, Channels, Frames, Height, Width]) easily trigger Out-Of-Memory (OOM) errors. By decoupling decoding from embedding and strictly enforcing 32-frame spatial downscaling, the application scales predictably.
-
-
-
-Complex Tensor Flattening: Navigated undocumented Hugging Face processor constraints by intercepting the raw 5D vision outputs and safely flattening them into 4D representations (\[batch\_size \* num\_frames, channels, height, width]) before pushing them through the spatio-temporal layers.
-
-
-
-Native Dimensionality Projection: Engineered a bypass to prevent double-projection errors by isolating the pooler\_output directly, neatly extracting the finalized 512-dimensional mathematical vectors.
-
-
-
-### Tech Stack
-
-
-
-Machine Learning: PyTorch, Hugging Face transformers (X-CLIP)
-
-
-
-Computer Vision: OpenCV (cv2)
-
-
-
-Vector Search: Qdrant (qdrant-client)
-
-
-
-Data Processing: NumPy
-
+* `main.py` - The core CLI engine for ingestion and database resets.
+* `app.py` - The Streamlit interactive web dashboard.
+* `src/embedder.py` - Handles the XCLIP model and PyTorch tensor generation.
+* `src/vector_store.py` - Manages the Qdrant connection and PointStruct schema.
+* `src/video_loader.py` - Yields memory-safe video chunks using OpenCV.
+* `compress_local_db.py` - Utility to quantize float32 vectors into 8-bit integers.
