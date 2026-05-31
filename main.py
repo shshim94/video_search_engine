@@ -1,81 +1,130 @@
 import os
 import argparse
-from src.video_loader import load_video_chunks
+import gc
+import glob
 from src.embedder import VideoTextEmbedder
 from src.vector_store import VideoDatabase
+from src.video_loader import load_video_chunks
 
-def run_search_engine(data_folder: str, search_query: str):
-    print("--- Booting up AI Models ---")
+def run_search_engine(data_folder, search_query, force_reindex):
+    print("\n--- Booting up AI Models ---")
     embedder = VideoTextEmbedder()
     db = VideoDatabase(vector_size=512)
 
-    print(f"\n--- Phase 2A: Processing Temporal Video Streams from '{data_folder}/' ---")
-    
-    if not os.path.exists(data_folder):
-        print(f"⚠️ ERROR: Python cannot find a folder named '{data_folder}'.")
-        return
+    # 1. Database Awareness: Check if we already have vectors to avoid re-processing
+    try:
+        collection_info = db.client.get_collection(db.collection_name)
+        is_indexed = collection_info.vectors_count > 0
+    except Exception:
+        is_indexed = False
 
-    all_files = [f for f in os.listdir(data_folder) if f.lower().endswith(".mp4")]
-    total_chunks_indexed = 0
-    
-    # 1. Slide the temporal window across all videos
-    for filename in all_files:
-        filepath = os.path.join(data_folder, filename)
+    # 2. Ingestion Phase
+    if force_reindex or not is_indexed:
+        print(f"\n--- Phase 2A: Processing Temporal Video Streams from '{data_folder}' ---")
+        total_chunks_indexed = 0
         
-        # Simulate camera IDs based on file names for the prototype
-        simulated_camera_id = f"camera_{filename.split('.')[0].lower()}"
+        if force_reindex:
+            print("Force reindex flag detected. Wiping old database...")
+            db.setup_collection()
         
-        print(f"Processing stream: {filename}...")
-        chunks = load_video_chunks(filepath, chunk_duration_sec=5.0)
+        search_pattern = os.path.join(data_folder, "Warehouse_*", "videos", "*.mp4")
+        video_files = glob.glob(search_pattern)
         
-        for chunk in chunks:
-            # Extract the vector for this specific 5-second window
-            video_vector = embedder.get_video_feature_vector(chunk["frames"])
+        print(f"Found {len(video_files)} videos matching the Warehouse structure.")
+        
+        if not video_files:
+            print(f"CRITICAL ERROR: No videos found matching pattern: {search_pattern}")
+            return
             
-            # Save it to the database with its exact timestamps
-            db.index_video_chunk(
-                video_path=filepath,
-                embedding=video_vector,
-                start_sec=chunk["start_sec"],
-                end_sec=chunk["end_sec"],
-                camera_id=simulated_camera_id
-            )
-            total_chunks_indexed += 1
+        for filepath in video_files:
+            # Extract just the filename from the deep path
+            filename = os.path.basename(filepath)
+            simulated_camera_id = filename.split('.')[0] 
+            
+            print(f"Processing stream: {simulated_camera_id}...")
+            
+            chunks = load_video_chunks(filepath, chunk_duration_sec=5.0)
+            
+            batch_size = 8
+            chunk_batch = []
+            
+            for chunk in chunks:
+                chunk_batch.append(chunk)
+                
+                if len(chunk_batch) == batch_size:
+                    frames_list = [c["frames"] for c in chunk_batch]
+                    vectors = embedder.get_batched_video_feature_vectors(frames_list)
+                    
+                    for i, v in enumerate(vectors):
+                        c = chunk_batch[i]
+                        db.index_video_chunk(
+                            video_path=filepath,
+                            embedding=v,
+                            start_sec=c["start_sec"],
+                            end_sec=c["end_sec"],
+                            camera_id=simulated_camera_id
+                        )
+                        total_chunks_indexed += 1
+                        
+                    for c in chunk_batch:
+                        if "frames" in c:
+                            del c["frames"]
+                    del chunk_batch
+                    chunk_batch = []
+                    gc.collect()
+            
+            if len(chunk_batch) > 0:
+                frames_list = [c["frames"] for c in chunk_batch]
+                vectors = embedder.get_batched_video_feature_vectors(frames_list)
+                
+                for i, v in enumerate(vectors):
+                    c = chunk_batch[i]
+                    db.index_video_chunk(
+                        video_path=filepath,
+                        embedding=v,
+                        start_sec=c["start_sec"],
+                        end_sec=c["end_sec"],
+                        camera_id=simulated_camera_id
+                    )
+                    total_chunks_indexed += 1
+                    
+                for c in chunk_batch:
+                    if "frames" in c:
+                        del c["frames"]
+                del chunk_batch
+                gc.collect()
+                
+            del chunks
+            gc.collect()
+            
+        print(f"\n✅ Indexing Complete! Added {total_chunks_indexed} video chunks to the database.")
+    else:
+        print("\n✅ Existing populated database detected. Skipping video ingestion phase.")
 
-    print(f"✅ Indexed {total_chunks_indexed} separate temporal chunks into the vector database.")
-
-    print("\n--- Phase 2B: Semantic Timeline Synthesis ---")
-    print(f"User Query: '{search_query}'")
-
-    # 2. Search the database for the top 5 matches
-    text_vector = embedder.get_text_feature_vector(search_query)
-    
-    # We lower the confidence threshold just slightly to catch events tracking across space
-    search_results = db.search_videos(text_vector, top_results=5)
-
-    if not search_results:
-        print("\n❌ No matches found in the database.")
-        return
-
-    # 3. Sort the results chronologically to build a tracking timeline
-    # We sort by file path first (to group by camera/video), then by start time
-    timeline_events = sorted(search_results, key=lambda x: (x.payload['file_path'], x.payload['start_time']))
-
-    print("\n📍 TARGET TRACKING TIMELINE:")
-    for result in timeline_events:
-        score = result.score
-        cam = result.payload['camera_id']
-        start = result.payload['start_time']
-        end = result.payload['end_time']
+    # 3. Search Phase
+    if search_query:
+        print(f"\n--- Phase 2B: Searching for '{search_query}' ---")
+        text_vector = embedder.get_text_feature_vector(search_query)
         
-        # Only show strong semantic matches
-        if score > 0.20:  
-            print(f" ⏱️ [{start:05.2f}s - {end:05.2f}s] | {cam.upper()} | Confidence: {score:.4f}")
+        search_results = db.search_videos(text_vector, top_results=5)
+        
+        print("\n📍 TARGET TRACKING TIMELINE:")
+        if not search_results:
+            print("No matches found.")
+        else:
+            timeline_events = sorted(search_results, key=lambda x: (x.payload.get('file_path', ''), x.payload.get('start_time', 0.0)))
+            for idx, result in enumerate(timeline_events):
+                payload = result.payload
+                cam_id = payload.get('camera_id', 'UNKNOWN')
+                start = payload.get('start_time', 0.0)
+                end = payload.get('end_time', 0.0)
+                print(f"[{idx+1}] Node: {cam_id} | Window: {start:05.2f}s to {end:05.2f}s | Confidence: {result.score:.4f}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Zero-Shot IVA Tracking System")
-    parser.add_argument("--data", type=str, default="data", help="Path to the folder containing video streams")
-    parser.add_argument("--query", type=str, required=True, help="Text description of the event to track")
-    
+    parser = argparse.ArgumentParser(description="Zero-Shot MTMC Tracking Pipeline")
+    parser.add_argument("--data", type=str, required=True, help="Path to video directory")
+    parser.add_argument("--query", type=str, default="", help="Semantic search query")
+    parser.add_argument("--reindex", action="store_true", help="Force database rebuild")
     args = parser.parse_args()
-    run_search_engine(data_folder=args.data, search_query=args.query)
+    
+    run_search_engine(data_folder=args.data, search_query=args.query, force_reindex=args.reindex)

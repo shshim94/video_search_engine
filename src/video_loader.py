@@ -1,58 +1,51 @@
 import cv2
-import numpy as np
 
-def load_video_chunks(filepath: str, chunk_duration_sec: float = 5.0, frames_per_chunk: int = 32) -> list[dict]:
+def load_video_chunks(video_path: str, chunk_duration_sec: float = 5.0):
     """
-    Slices a video into temporal windows and extracts a uniform sample of frames per window.
+    Yields video chunks one at a time to prevent RAM exhaustion.
+    """
+    cap = cv2.VideoCapture(video_path)
     
-    Returns:
-        A list of dictionaries. Each dictionary contains:
-        - 'start_sec': The start time of the chunk in seconds.
-        - 'end_sec': The end time of the chunk in seconds.
-        - 'frames': The extracted 32 frames for the Vision Transformer.
-    """
-    cap = cv2.VideoCapture(filepath)
-    if not cap.isOpened():
-        raise ValueError(f"⚠️ Could not open video file: {filepath}")
-
+    # Get video framerate (default to 30 if cannot be read)
     fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    # Calculate how many raw frames make up one time window (e.g., 5 secs * 30 fps = 150 frames)
-    raw_frames_per_window = int(chunk_duration_sec * fps)
-    
-    chunks = []
-    
-    # Slide the window across the video
-    for window_start_idx in range(0, total_frames, raw_frames_per_window):
-        window_end_idx = min(window_start_idx + raw_frames_per_window, total_frames)
+    if fps == 0 or fps is None:
+        fps = 30.0
         
-        # Edge Case: If the remaining tail of the video is shorter than our required 32 frames, skip it.
-        if (window_end_idx - window_start_idx) < frames_per_chunk:
-            continue 
+    frames_per_chunk = int(fps * chunk_duration_sec)
+    
+    current_chunk_frames = []
+    start_frame = 0
+    
+    while True:
+        ret, frame = cap.read()
+        
+        # If we reach the end of the video
+        if not ret:
+            if len(current_chunk_frames) > 0:
+                end_sec = (start_frame + len(current_chunk_frames)) / fps
+                yield {
+                    "start_sec": start_frame / fps,
+                    "end_sec": end_sec,
+                    "frames": current_chunk_frames
+                }
+            break
             
-        # Uniformly sample exactly 32 frames from within this specific time window
-        frame_indices = np.linspace(window_start_idx, window_end_idx - 1, frames_per_chunk, dtype=int)
+        # OpenCV reads in BGR format, AI models expect RGB format
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        current_chunk_frames.append(frame_rgb)
         
-        window_frames = []
-        for idx in frame_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ret, frame = cap.read()
-            if ret:
-                # Convert BGR to RGB for the Hugging Face processor
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                window_frames.append(frame)
-        
-        # If extraction was successful, bundle it with its temporal metadata
-        if len(window_frames) == frames_per_chunk:
-            start_sec = window_start_idx / fps
-            end_sec = window_end_idx / fps
+        # Once we hit exactly 5 seconds of frames, pause and yield to the GPU
+        if len(current_chunk_frames) >= frames_per_chunk:
+            end_sec = (start_frame + frames_per_chunk) / fps
             
-            chunks.append({
-                "start_sec": round(start_sec, 2),
-                "end_sec": round(end_sec, 2),
-                "frames": window_frames
-            })
+            yield {
+                "start_sec": start_frame / fps,
+                "end_sec": end_sec,
+                "frames": current_chunk_frames
+            }
+            
+            # Reset the buffer for the next 5 seconds
+            start_frame += frames_per_chunk
+            current_chunk_frames = []
             
     cap.release()
-    return chunks

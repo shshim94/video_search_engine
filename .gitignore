@@ -1,7 +1,15 @@
-# Ignore the virtual environment
+# IDE and System Files
+.vs/
+
+# Virtual Environments
 venv/
 __pycache__/
 
-# Ignore the video files and database
+# Databases
+local_vector_db/
+qdrant_db/
+
+# Heavy Video Data
 data/
 *.mp4
+*.avi
